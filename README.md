@@ -22,6 +22,7 @@ python recipes/00_spark_info/spark_info.py            # what this box is
 python recipes/01_roofline/measure.py                 # measured bandwidth + TFLOP/s -> results/roofline.json
 python recipes/02_decode_ceiling/ceiling.py --params 8 --bw-from-results
 python recipes/03_int4_gemv/run.py                    # 4-bit decode GEMV vs reference and bf16
+python recipes/08_int4_tensorcore/run.py              # tensor-core 4-bit matmul: check, invariance, speed, fused QKV
 ```
 
 Pick the container tag from the [NGC PyTorch catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch).
@@ -43,6 +44,7 @@ your machine's measured bandwidth instead of the spec sheet's.
 | 05 | [cuda_graphs](recipes/05_cuda_graphs/decode_graph.py) | Capturing a decode step to remove launch overhead |
 | 06 | [batch_invariance](recipes/06_batch_invariance/check_invariance.py) | Whether a row's bits change with batch size (cuBLAS vs a row-invariant kernel), which exact speculative decoding depends on |
 | 07 | [profiling](recipes/07_profiling/) | `nsys` and `ncu` wrappers with what to read in each |
+| 08 | [int4_tensorcore](recipes/08_int4_tensorcore/) | The faster 4-bit kernel: weights repacked at load into tensor-core order, `mma.sync` over 16-row tiles (decode and draft-verify windows), shape-only split-K, fused Q/K/V in one launch, row-invariant by design |
 
 Example: what is the most an 8B model at 4-bit could decode on this box, alone and with speculative
 decoding accepting 3 tokens per pass?
@@ -56,6 +58,7 @@ Profiling a kernel:
 ```bash
 recipes/07_profiling/nsys.sh python recipes/05_cuda_graphs/decode_graph.py --rows 1
 recipes/07_profiling/ncu.sh gemv_warp python recipes/03_int4_gemv/run.py --shape 14336x4096 --rows 1 --skip-naive
+recipes/07_profiling/ncu.sh qmv_tc python recipes/08_int4_tensorcore/run.py --only speed --shape 14336x4096 --rows 1
 ```
 
 ## Layout
@@ -65,7 +68,7 @@ common/      build.py (JIT for this GPU), bench.py (CUDA-event timing, L2 flush,
              verify.py (tolerances, bitwise equality), spark.py (device properties)
 recipes/     one directory per technique
 docs/        METHODS.md: the optimization playbook
-tests/       CPU tests for the pure-Python parts (quantization layout, ceiling math)
+tests/       CPU tests for the pure-Python parts (quantization and tensor-core layouts, ceiling math)
 scripts/     container.sh: NGC PyTorch container with the repo mounted
 results/     measurements and profiles written by the recipes (not committed)
 ```
@@ -76,8 +79,13 @@ results/     measurements and profiles written by the recipes (not committed)
 python -m pytest -q tests        # runs anywhere, no GPU needed
 ```
 
-The kernel recipes check themselves on the GPU. Recipes 03 and 04 print `OK`/`FAIL` against a
-reference before benchmarking, and `03_int4_gemv/run.py` exits non-zero on a failure. Recipe 05 checks
+The kernel recipes check themselves on the GPU. Recipes 03, 04 and 08 print `OK`/`FAIL` against a
+reference before benchmarking, and `03_int4_gemv/run.py` and `08_int4_tensorcore/run.py` exit non-zero
+on a failure. Recipe 08 also fails if any row's bits change with batch size.
+
+The CPU tests cover recipe 08's weight layout too. They decode the packed words the same way the kernel
+does and check that each lane gets the tensor-core fragment it expects, so layout bugs show up before
+anything runs on the GPU. Recipe 05 checks
 the graph's output against eager, and recipe 06 reports `same`/`DIFF` per batch size.
 
 ## Status
@@ -88,8 +96,8 @@ recipe's README once they're confirmed.
 
 ## Roadmap
 
-- A faster 4-bit decode kernel: weights repacked at load time into tensor-core fragment order, a
-  shape-only split-K for small layers, and several projections in one launch
+- Recipe 08 follow-ups once it's measured: stage activations in shared memory, a deeper
+  `cp.async` pipeline, and a tensor-core prefill path for hundreds of rows
 - NVFP4 and FP8 recipes for Blackwell tensor cores
 - Speculative decoding: n-gram drafts from the context, and a row-invariant verify pass
 - Measured results from a DGX Spark for every recipe

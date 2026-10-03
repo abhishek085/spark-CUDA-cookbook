@@ -45,8 +45,9 @@ What to do, from the most impact to the least:
 1. **Read fewer bytes.** 4-bit with group-64 affine scales is 4.5 bits per weight, 3.6× fewer bytes
    than bf16. Store the KV cache in FP8. On hybrid models, only the attention layers need KV at all.
 2. **Lay out weights for the kernel, once, at load time.** Every warp load should be 16 bytes per lane,
-   consecutive across lanes (recipe 03's `warp` kernel). TensorFold goes further and repacks weights
-   into tensor-core fragment order, so the inner loop does no shuffling.
+   consecutive across lanes (recipe 03's `warp` kernel). Recipe 08 goes further and repacks weights
+   into tensor-core fragment order, so the inner loop does no shuffling: a 4-bit pair becomes a bf16
+   register with a mask, an OR and one subtraction.
 3. **Fold dequantization into the math.** Use `Σ(q·s + b)·x = s·Σq·x + b·Σx`. The scale and bias are
    applied once per group, never to each weight. You can also compute `Σx` per group in the
    preceding norm kernel and pass it in.
@@ -57,6 +58,9 @@ What to do, from the most impact to the least:
 6. **Remove launch overhead** with CUDA graphs (recipe 05). Capture one graph per row count you serve.
 7. **Fuse the glue** (norm, SwiGLU, rotary, gates) in Triton (recipe 04). Fewer launches, fewer
    round trips through memory.
+
+For verify windows (2–64 rows) use tensor cores on the same 4-bit stream (recipe 08). The weights are
+read once whatever the row count, so a 16-row verify costs close to a 1-row decode.
 
 The target is a GEMV that reaches 80–90% of recipe 01's read bandwidth on large shapes. Small shapes
 fall short of that because there aren't enough blocks to fill the SMs. Split K across blocks for those,
