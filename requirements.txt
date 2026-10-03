@@ -1,0 +1,4 @@
+# The NGC PyTorch container (scripts/container.sh) already has torch, triton and ninja for GB10.
+# Outside it, install a CUDA build of torch for aarch64 first, then:
+ninja
+pytest
